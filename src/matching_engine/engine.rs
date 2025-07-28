@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
+use rust_decimal::Decimal;
 use crate::matching_engine::{
     orderbook::OrderBook,
-    types::{TradingPair, Order, Trade},
+    types::{TradingPair, Order},
     messages::{EngineMessage, EngineResponse, DatabaseMessage}
 };
 
@@ -29,11 +30,15 @@ impl MatchingEngine {
         let engine = Self{
             orderbooks: HashMap::new(),
             message_receiver: msg_rx,
-            response_sender: resp_tx,
+            message_sender: resp_tx,
             database_sender: db_tx,
         };
 
         (engine, msg_tx, resp_rx, db_rx)
+    }
+
+    pub fn add_market(&mut self, pair: TradingPair) {
+        self.orderbooks.insert(pair, OrderBook::new());
     }
 
     pub fn run(mut self){
@@ -43,14 +48,14 @@ impl MatchingEngine {
                     self.handle_place_order(pair, order, price);
                 },
 
-                EngineMessage::CancelOrderOrder{pair, order, price} => {
+                EngineMessage::CancelOrder{order_id} => {
                     self.handle_cancel_order(order_id);
                 }
             }
         }
     }
 
-    fn handle_place_order(&mut self, pair: TradingPair, price: Decimal, order: Order){
+    fn handle_place_order(&mut self, pair: TradingPair, order: Order, price: Decimal){
         let order_id = order.id;
 
         if let Some(orderbook) = self.orderbooks.get_mut(&pair){
@@ -58,9 +63,33 @@ impl MatchingEngine {
 
             let response = EngineResponse::OrderPlaced{
                 order_id,
-                
+                trades: trades.clone(),
+            };
+
+            let _ = self.message_sender.send(response);
+
+            if !trades.is_empty(){
+                let _ = self.database_sender.send(DatabaseMessage::SaveTrades(trades.clone()));
+                let _ = self.database_sender.send(DatabaseMessage::UpdateBalances{
+                    user_id: order.user_id.clone(),
+                    trades,
+                });
             }
+
+            let _ = self.database_sender.send(DatabaseMessage::SaveOrder(order));
+        } else {
+            let response = EngineResponse::Error{
+                message: format!("Market not found for pair: {:?}", pair),
+            };
+
+            let _ = self.message_sender.send(response);
         }
     }
 
+    fn handle_cancel_order(&mut self, order_id: uuid::Uuid){
+        let response = EngineResponse::OrderCanceled{order_id};
+        let _ = self.message_sender.send(response);
+    }
 }
+
+

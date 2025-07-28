@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use uuid::Uuid;
 use rust_decimal::Decimal;
+use chrono::{DateTime, Utc};
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +30,11 @@ impl Order{
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Limit {
+    pub price: Decimal,
+    pub orders: Vec<Order>,
+}
 
 impl Limit{
     pub fn new(price: Decimal) -> Limit{
@@ -62,7 +67,7 @@ pub struct Trade{
 
 
 impl Trade{
-    pub fn new(buyer_order_id: Uuid, seller_order_id: Uuid, price: Decimal, quantity: Decimal) -> self{
+    pub fn new(buyer_order_id: Uuid, seller_order_id: Uuid, price: Decimal, quantity: Decimal) -> Self{
         Trade{
             id: Uuid::new_v4(),
             buyer_order_id,
@@ -71,5 +76,17 @@ impl Trade{
             quantity,
             timestamp: Utc::now(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TradingPair {
+    pub base: String,
+    pub quote: String,
+}
+
+impl TradingPair {
+    pub fn new(base: String, quote: String) -> Self {
+        TradingPair { base, quote }
     }
 }
