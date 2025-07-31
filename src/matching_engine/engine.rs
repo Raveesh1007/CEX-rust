@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use rust_decimal::Decimal;
+use crate::balance::BalanceManager;
+use crate::websocket::events::MarketDataEvent;
+
 use crate::matching_engine::{
     orderbook::OrderBook,
     types::{TradingPair, Order},
@@ -10,31 +13,37 @@ use crate::matching_engine::{
 
 pub struct MatchingEngine{
     pub orderbooks: HashMap<TradingPair, OrderBook>,
+    pub balance_manager: BalanceManager,
     pub message_receiver: Receiver<EngineMessage>,
     pub message_sender: Sender<EngineResponse>,
     pub database_sender: Sender<DatabaseMessage>,
+    pub event_broadcaster: Sender<MarketDataEvent>,
 }
 
 impl MatchingEngine {
     pub fn new() -> (
         Self,
-        Sender<EngineMessage>,    // For sending orders to engine
-        Receiver<EngineResponse>, // For receiving responses
-        Receiver<DatabaseMessage> // For database worker
+        Sender<EngineMessage>,    
+        Receiver<EngineResponse>, 
+        Receiver<DatabaseMessage>,
+        Receiver<MarketDataEvent>
     ){
         let (msg_tx, msg_rx) = unbounded();
         let (resp_tx, resp_rx) = unbounded();
         let (db_tx, db_rx) = unbounded();
+        let (ws_tx, ws_rx) = unbounded();
 
 
         let engine = Self{
             orderbooks: HashMap::new(),
+            balance_manager: BalanceManager::new(),
             message_receiver: msg_rx,
             message_sender: resp_tx,
             database_sender: db_tx,
+            event_broadcaster: ws_tx,
         };
 
-        (engine, msg_tx, resp_rx, db_rx)
+        (engine, msg_tx, resp_rx, db_rx, ws_rx)
     }
 
     pub fn add_market(&mut self, pair: TradingPair) {
@@ -60,6 +69,11 @@ impl MatchingEngine {
 
         if let Some(orderbook) = self.orderbooks.get_mut(&pair){
             let trades = orderbook.add_order(price, order.clone());
+
+            for trade in &trades {
+                let trade_event = MarketDataEvent::from_trade(trade, &pair);
+                let _ = self.event_broadcaster.send(trade_event);
+            }
 
             let response = EngineResponse::OrderPlaced{
                 order_id,
@@ -87,8 +101,12 @@ impl MatchingEngine {
     }
 
     fn handle_cancel_order(&mut self, order_id: uuid::Uuid){
-        let response = EngineResponse::OrderCanceled{order_id};
+        let response = EngineResponse::OrderCancelled{order_id};
         let _ = self.message_sender.send(response);
+    }
+
+    pub fn add_user(&mut self, user_id: String, initial_balances: HashMap<String, Decimal>) {
+        self.balance_manager.add_user(user_id, initial_balances);
     }
 }
 

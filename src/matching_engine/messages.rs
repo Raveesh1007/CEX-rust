@@ -1,31 +1,28 @@
 use rust_decimal::Decimal;
 use crate::matching_engine::types::{Order, Trade, TradingPair};
 
-
 #[derive(Debug, Clone)]
-pub enum EngineMessage{
-    PlaceOrder{
+pub enum EngineMessage {
+    PlaceOrder {
         pair: TradingPair,
         order: Order,
         price: Decimal,
     },
-    CancelOrder{
-        order_id: uuid:: Uuid,
+    CancelOrder {
+        order_id: uuid::Uuid,
     },    
 }
 
-
 #[derive(Debug, Clone)]
-pub enum EngineResponse{
-    OrderPlaced{
-        order_id: uuid:: Uuid,
+pub enum EngineResponse {
+    OrderPlaced {
+        order_id: uuid::Uuid,
         trades: Vec<Trade>,
     },
-    OrderCanceled{
-        order_id: uuid:: Uuid,
+    OrderCancelled {
+        order_id: uuid::Uuid,
     },
-
-    Error{
+    Error {
         message: String,
     },    
 }
