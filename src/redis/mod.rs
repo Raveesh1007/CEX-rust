@@ -12,103 +12,109 @@ pub struct RedisService {
     response_receiver: Receiver<EngineResponse>,
 }
 
-impl RedisService{
-    pub fn new(redis_url: &str,
+impl RedisService {
+    pub fn new(
+        redis_url: &str,
         order_sender: Sender<EngineMessage>,
         response_receiver: Receiver<EngineResponse>,
-    ) -> Result<Self, redis::RedisError>{
+    ) -> Result<Self, redis::RedisError> {
         let client = Client::open(redis_url)?;
 
-        Ok(RedisService{
+        Ok(RedisService {
             client, 
             order_sender,
             response_receiver,
         })
     }
 
-
-    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>>{
-        println!("Starting Redis service...");
-
+    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut con = self.client.get_async_connection().await?;
-
         let response_receiver = self.response_receiver.clone();
         let client_clone = self.client.clone();
 
-        tokio::spawn(async move{
-            let mut response_con = client_clone.get_async_connection().await.unwrap();
+        tokio::spawn(async move {
+            match client_clone.get_async_connection().await {
+                Ok(mut response_con) => {
+                    while let Ok(response) = response_receiver.recv() {
+                        match response {
+                            EngineResponse::OrderPlaced { order_id, trades } => {
+                                let redis_response = RedisOrderResponse {
+                                    request_id: order_id,
+                                    success: true,
+                                    order_id: Some(order_id),
+                                    trades: trades.iter().map(RedisTradeInfo::from).collect(),
+                                    error: None,
+                                };
 
-            while let Ok(response) = response_receiver.recv(){
-                match response{
-                    EngineResponse::OrderPlaced{order_id, trades} => {
-                        let redis_response = RedisOrderResponse{
-                            request_id: order_id,
-                            success: true,
-                            order_id: Some(order_id),
-                            trades: trades.iter().map(RedisTradeInfo::from).collect(),
-                            error: None,
-                        };
+                                if let Ok(json_response) = serde_json::to_string(&redis_response) {
+                                    let _: Result<(), _> = response_con.publish("order_response", json_response).await;
+                                }
 
-                        let json_response = serde_json::to_string(&redis_response).unwrap();
-                        let _: () = response_con.publish("order_response", json_response).await.unwrap();
+                                for trade in trades {
+                                    let market_update = RedisMarketUpdate {
+                                        market: "BTC_USD".to_string(),
+                                        data: serde_json::to_value(&RedisTradeInfo::from(&trade)).unwrap(),
+                                        update_type: "trade".to_string(),
+                                        timestamp: chrono::Utc::now(),
+                                    };
 
+                                    if let Ok(json) = serde_json::to_string(&market_update) {
+                                        let _: Result<(), _> = response_con.publish("market_updates", json).await;
+                                    }
+                                }
+                            }
 
-                        for trade in trades{
-                            let market_update = RedisMarketUpdate{
-                                market: "BTC_USD".to_string(),
-                                data: serde_json::to_value(&RedisTradeInfo::from(&trade)).unwrap(),
-                                update_type: "trade".to_string(),
-                                timestamp: chrono::Utc::now(),
-                            };
+                            EngineResponse::Error { message } => {
+                                let redis_response = RedisOrderResponse {
+                                    request_id: uuid::Uuid::new_v4(),
+                                    success: false,
+                                    order_id: None,
+                                    trades: vec![],
+                                    error: Some(message),
+                                };
 
-                            let json = serde_json::to_string(&market_update).unwrap();
-                            let _: () = response_con.publish("market_updates", json).await.unwrap();
+                                if let Ok(json) = serde_json::to_string(&redis_response) {
+                                    let _: Result<(), _> = response_con.publish("order_response", json).await;
+                                }
+                            }
+                            
+                            EngineResponse::OrderCancelled { .. } => {
+                            }
                         }
                     }
-
-                    EngineResponse::Error{message} => {
-                        let redis_response = RedisOrderResponse{
-                            request_id: uuid::Uuid::new_v4(),
-                            success: false,
-                            order_id: None,
-                            trades: vec![],
-                            error: Some(message),
-                        };
-
-                        let json = serde_json::to_string(&redis_response).unwrap();
-                        let _: () =  response_con.publish("order_response", json).await.unwrap();
-                    }
-                    _ => {}
+                }
+                Err(_) => {
                 }
             }
         });
 
+        loop {
+            match con.blpop::<_, Vec<String>>("order_queue", 0.0).await {
+                Ok(result) => {
+                    if result.len() >= 2 {
+                        let json_data = &result[1];
 
-        loop{
-            let result: Vec<String> = con.blpop("order_queue", 1.0).await?;
+                        if let Ok(order_request) = serde_json::from_str::<RedisOrderRequest>(json_data) {
+                            if let Ok((pair, price, order)) = order_request.to_engine_message() {
+                                let engine_message = EngineMessage::PlaceOrder { 
+                                    pair, 
+                                    price, 
+                                    order 
+                                };
 
-            if result.len() >= 2{
-                let json_data = &result[1];
-
-
-                if let Ok(order_request) = serde_json::from_str::<RedisOrderRequest>(json_data) {
-                    println!("Recieved order request: {:?}", order_request);
-
-                    match order_request.to_engine_message(){
-                        Ok((pair, price, order)) => {
-                            let engine_message = EngineMessage::PlaceOrder{pair, price, order};
-
-                            if let Err(e) = self.order_sender.send(engine_message){
-                                println!("Error sending order to engine: {:?}", e);
+                                let _ = self.order_sender.send(engine_message);
                             }
                         }
-
-                        Err(e) => {
-                            println!("Error parsing order request: {:?}", e);
-                        }
                     }
-                }else{
-                    println!("Invalid order request format");
+                }
+                Err(_) => {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    
+                    if let Ok(new_con) = self.client.get_async_connection().await {
+                        con = new_con;
+                    } else {
+                        return Err("Failed to reconnect to Redis".into());
+                    }
                 }
             }
         }
