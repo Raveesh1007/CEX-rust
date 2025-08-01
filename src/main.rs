@@ -1,6 +1,7 @@
 mod matching_engine;
 mod balance;
 mod websocket; 
+mod redis;
 
 use std::thread;
 use std::time::Duration;
@@ -12,10 +13,11 @@ use matching_engine::{
     messages::{EngineMessage, EngineResponse, DatabaseMessage}
 };
 use websocket::WebSocketServer; 
+use redis::RedisService;
 
 #[tokio::main] 
 async fn main() {
-    println!("Starting WebSocket-Enabled Trading Engine...\n");
+    println!("Starting Redis-Enabled Trading Engine...\n");
     
     let (mut engine, order_sender, response_receiver, db_receiver, ws_receiver) = MatchingEngine::new();
     
@@ -35,8 +37,20 @@ async fn main() {
             println!("WebSocket server error: {}", e);
         }
     });
-    
     println!("WebSocket server started on ws://127.0.0.1:8080");
+    
+    let redis_service = RedisService::new(
+        "redis://127.0.0.1:6379/",
+        order_sender.clone(),
+        response_receiver,
+    ).expect("Failed to create Redis service");
+    
+    tokio::spawn(async move {
+        if let Err(e) = redis_service.start().await {
+            println!("Redis service error: {}", e);
+        }
+    });
+    println!("Redis service started - listening for orders on 'order_queue'");
     
     let _engine_handle = thread::spawn(move || {
         println!("Matching Engine started with balance validation");
@@ -63,52 +77,26 @@ async fn main() {
         }
     });
     
-    println!("Testing balance validation with WebSocket broadcasting...\n");
+    println!("Sending test order directly to engine...\n");
     
-    // Test orders
     let sell_order = Order::new(BidOrAsk::Ask, Decimal::from(2));
-    order_sender.send(EngineMessage::PlaceOrder {
+    if let Err(e) = order_sender.send(EngineMessage::PlaceOrder {
         pair: btc_usd.clone(),
         price: Decimal::from(50000),
         order: sell_order,
-    }).unwrap();
-    
-    let buy_order = Order::new(BidOrAsk::Bid, Decimal::from(1));
-    order_sender.send(EngineMessage::PlaceOrder {
-        pair: btc_usd,
-        price: Decimal::from(50000),
-        order: buy_order,
-    }).unwrap();
-    
-    println!("Listening for responses...\n");
-    
-    for i in 0..2 {
-        match response_receiver.recv_timeout(Duration::from_secs(1)) {
-            Ok(response) => {
-                match response {
-                    EngineResponse::OrderPlaced { order_id, trades } => {
-                        println!("Order {} placed successfully!", order_id);
-                        if !trades.is_empty() {
-                            println!("   - {} trades executed", trades.len());
-                            println!("   - Trade events broadcasted via WebSocket!");
-                        }
-                    },
-                    EngineResponse::Error { message } => {
-                        println!("Order rejected: {}", message);
-                    },
-                    _ => {}
-                }
-            },
-            Err(_) => {
-                println!("Timeout waiting for response {}", i + 1);
-                break;
-            }
-        }
+    }) {
+        println!("Failed to send order: {}", e);
     }
     
-    println!("\n WebSocket-enabled trading engine running!");
-    println!("Connect to ws://127.0.0.1:8080 to see live market data");
-    println!("   Press Ctrl+C to stop...");
+    println!("All services started!");
+    println!("WebSocket: ws://127.0.0.1:8080");
+    println!("Redis: Listening on 'order_queue'");
+    println!("Engine: Processing orders");
+    println!("Database: Persisting data");
+    println!("\n To test via Redis, send JSON to 'order_queue':");
+    println!(r#"   redis-cli LPUSH order_queue '{{"id":"test1","user_id":"user123","market":"BTC_USD","side":"buy","order_type":"limit","price":49000,"quantity":1,"timestamp":"2024-01-01T00:00:00Z"}}'"#);
+    println!("\n   Press Ctrl+C to stop...");
     
+
     tokio::time::sleep(Duration::from_secs(3600)).await;
 }
