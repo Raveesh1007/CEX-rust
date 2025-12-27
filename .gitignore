@@ -1,1 +1,20 @@
-/target
+# Environment files (NEVER commit these!)
+.env
+.env.local
+.env.production
+
+# Build artifacts
+/target/
+Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database files
+*.db
+*.sqlite
